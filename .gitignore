@@ -1,0 +1,18 @@
+# Generated STL exports (large binary files – regenerate with tidee.py)
+*.stl
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# VS Code / editor
+.vscode/
+*.swp
+*~
+
+# OS junk
+Thumbs.db
+.DS_Store
+desktop.ini
