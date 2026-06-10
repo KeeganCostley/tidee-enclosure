@@ -1029,6 +1029,9 @@ if __name__ == "__main__":
         print(f"  Export error: {ex}")
 
     print("\nOpening preview...")
+    from ocp_vscode import set_port
+    set_port(3939)          # re-establish config handshake now that backend is running
     show(front_shell, back_cover.moved(Location(Vector(W_front + 30, 0, 0))),
-         port=3940, reset_camera="reset")
+         port=3939, reset_camera="reset",
+         names=["front_shell", "back_cover"])
     print("Done.")
