@@ -59,18 +59,29 @@ W_front    = 88.0
 W_back     = 68.0
 D          = 50.0
 H_front    = 124.0
-front_lean = 9.0      # degrees -- front face leans back
+front_lean = 10.0     # degrees -- front face leans back
 top_slope  = 10.0     # degrees -- top drops front-to-back
 wall       = 3.0
 r_front    = 14.0
 r_back     = 7.0
 r_side     = 10.0
+top_fillet = 8.0      # mm -- TRUE 3D fillet on the top perimeter (pebble dome).
+                      #   The top ~(top_fillet+2) mm of the cavity is filled
+                      #   SOLID so the outer top edge can round over by this full
+                      #   radius without thinning the 3 mm wall (a post-hoc fillet
+                      #   on a hollow wall is capped at ~wall; this is not).
+                      #   Set 0 to disable (falls back to a small edge-break).
 
 # Derived
-top_front_y = H_front * math.tan(math.radians(front_lean))            # ≈ 19.64
-top_depth   = D - top_front_y                                           # ≈ 30.36
-H_back      = H_front - top_depth * math.tan(math.radians(top_slope)) # ≈ 118.65
-face_len    = math.sqrt(top_front_y**2 + H_front**2)                  # ≈ 125.5
+top_front_y = H_front * math.tan(math.radians(front_lean))            # ≈ 21.87 @10°
+top_depth   = D - top_front_y                                           # ≈ 28.13
+H_back      = H_front - top_depth * math.tan(math.radians(top_slope)) # ≈ 119.04
+face_len    = math.sqrt(top_front_y**2 + H_front**2)                  # ≈ 125.9
+
+# Highest z still on the CLEAN, planar front face.  The top fillet rounds the
+# surface over the top ~top_fillet mm, and the cavity is capped here, so both
+# the front-Y sampler and the rib series must stop at or below this line.
+z_top_clear = H_front - (top_fillet + 2.0)                            # ≈ 114 @8mm
 
 
 def half_w(y: float) -> float:
@@ -113,22 +124,32 @@ wordmark_size               = 11.0
 wordmark_depth              = 1.5
 wordmark_offset_from_bottom = 32.0
 
-# Back cover
-cover_t   = 2.5
-ledge_h   = 2.5
-ledge_d   = 3.5
-
-tab_thick = 1.5
-tab_len   = 8.0
-tab_w     = 8.0
-bump_h    = 1.4
-slot_gap  = 0.6
+# Back cover -- FLUSH RABBET JOINT (friction press-fit, adapted from StockTracker)
+#   The cover is a thin flange that seats into a recess (so its outer face is
+#   FLUSH with the back), with a plug rib that press-fits into the opening all
+#   the way around.  No snaps / no cantilever arms -- retention is friction
+#   spread over the whole perimeter.  Verified against the StockTracker .3mf.
+cover_t    = 1.5    # flange thickness == recess depth (sits flush with back face)
+rebate_lip = 1.5    # shoulder width per side that the flange rests on
+plug_depth = 4.0    # how far the plug rib reaches into the opening
+plug_wall  = 2.0    # thickness of the plug rib wall
+plug_cham  = 1.0    # lead-in chamfer at the plug tip (eases insertion)
+fit_clear  = 0.15   # clearance per side, plug wall vs opening wall (StockTracker-perfect)
+notch_w    = 16.0   # fingernail-pry notch width
+notch_h    = 3.0    # notch depth into the cover edge
 
 # Derived cover geometry
-cw      = 2.0 * (half_w(D - r_back) - wall) - 0.6   # inner back width (cover panel width)
-ch_full = H_back - 2.0 * wall - ledge_h
-ch      = ch_full - usb_housing_h - 0.4              # panel height above USB housing
-ledge_z = H_back - wall - ledge_h                    # Z bottom of ledge
+#  - The back opening (plug passage) is the inner-cavity cross-section at the back.
+#  - The recess (flange seat) is that opening grown by rebate_lip on every side,
+#    cut only cover_t deep into the 3 mm back wall (leaving a shoulder).
+open_w   = 2.0 * (half_w(D - r_back) - wall)         # plug-passage width  (inner cavity)
+open_z0  = usb_housing_h + 3.0                         # opening bottom (clears USB housing + recess lip)
+open_z1  = z_top_clear - rebate_lip - 1.0             # opening top (recess stays below the dome)
+open_h   = open_z1 - open_z0
+recess_w = open_w + 2.0 * rebate_lip                  # flange-seat width
+recess_h = open_h + 2.0 * rebate_lip
+y_open   = D - r_back                                  # opening plane in Y (43 mm)
+corner_r = max(r_back - wall, 2.0)                     # opening corner radius
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -179,7 +200,7 @@ def _front_face_outer_y(wz: float) -> float:
     return p_y + (wz - p_z) * (dir_y / dir_z)
 
 
-def _sample_front_y(outer_solid, n: int = 14):
+def _sample_front_y(outer_solid, n: int = 18):
     """
     Build a Z→actual-front-face-Y lookup table from the real outer solid.
 
@@ -189,8 +210,14 @@ def _sample_front_y(outer_solid, n: int = 14):
 
     Returns (z_list, y_list) for use with _interp_front_y().
     """
-    z_lo   = 6.0
-    z_hi   = H_front - 3.0   # ~121 mm
+    # z_lo sits just ABOVE the front-face tangent touch-point on the base
+    # corner-circle (computed at z ≈ 8.22 mm for r_side=10, front_lean=10° —
+    # verified in the geometry lab).  Sampling below that lands on the rounded
+    # base curl (a downward-facing surface), which would corrupt the table and
+    # tip near-base ribs onto the underside.  Keep every sample on the clean,
+    # viewer-facing front face.
+    z_lo   = 8.5
+    z_hi   = z_top_clear     # stop below the top dome / fillet zone
     z_list = [z_lo + (z_hi - z_lo) * i / (n - 1) for i in range(n)]
     y_list = []
     for z in z_list:
@@ -358,7 +385,7 @@ def make_boss_pins():
       Rx(θ) maps (0,0,1) -> (0, -sin θ, cos θ)
       We want -> face_normal_in = (0, cos lr, -sin lr)
       -> sin θ = -cos lr,  cos θ = -sin lr
-      -> θ = -(90deg + front_lean)          [−99deg for front_lean = 9deg]
+      -> θ = -(90deg + front_lean)          [−100deg for front_lean = 10deg]
     """
     lr      = math.radians(front_lean)
     pin_h   = pcb_stack_z - wall   # 7.6 mm -- visible height from inner surface
@@ -366,7 +393,7 @@ def make_boss_pins():
     overlap = 1.5                   # mm the root is buried in the wall
 
     # Rotation that aligns cylinder +Z with face_normal_in
-    rot_deg = -(90.0 + front_lean)  # −99deg for 9deg lean
+    rot_deg = -(90.0 + front_lean)  # −100deg for 10deg lean
 
     positions = [
         (12.0,  boss_u_offset),
@@ -432,39 +459,41 @@ def make_usb_housing_cut():
 
 def make_back_opening_cut():
     """
-    Remove the back wall to open the shell for the hatch cover.
+    Stepped RABBET opening for the flush press-fit cover.
 
-    Geometry notes:
-      - Inner cavity back surface is at Y ≈ D-r_back-wall = 40 mm
-      - Outer back surface extends to Y = D = 50 mm
-      - Cut must start BEFORE the inner back surface and extend PAST the outer
-      - Width = inner cavity width (preserve rounded side-wall corners)
-      - Height starts at usb_housing_h (preserve USB pocket at base)
+    Two stacked cuts through the back wall (outer back surface at Y=D=50,
+    inner cavity back at Y=D-wall=47):
+
+      1. PLUG PASSAGE -- the through-hole the cover's plug rib drops into.
+         Outline = inner cavity cross-section (open_w x open_h), rounded
+         corners.  Runs from inside the cavity out to the recess floor.
+      2. RECESS (flange seat) -- a shallow pocket cover_t deep, grown by
+         rebate_lip on every side (recess_w x recess_h).  The flange drops in
+         here flush with the back face.  The ring of wall between (1) and (2)
+         is the SHOULDER the flange rests on.
     """
-    open_w  = 2.0 * (half_w(D - r_back) - wall) + 0.5   # ≈ 65.3 mm
-    open_h  = H_back - usb_housing_h + 2.0               # ≈ 112.65 mm
-    y_start = D - r_back - wall - 3.0                    # ≈ 37 mm (before inner back wall)
-    depth   = D + 5.0 - y_start                          # ≈ 18 mm (past outer back surface)
+    cz = (open_z0 + open_z1) / 2.0
 
-    box = Box(open_w, depth, open_h, align=(Align.CENTER, Align.MIN, Align.MIN))
-    return box.moved(Location(Vector(0, y_start, usb_housing_h)))
+    # 1) plug passage -- from inside the cavity out to the recess floor
+    y_passage_start = D - wall - 3.0          # 44 mm, inside the cavity
+    y_passage_end   = D - cover_t             # 48.5 mm, recess floor
+    passage = Box(open_w, (y_passage_end - y_passage_start) + 0.02, open_h,
+                  align=(Align.CENTER, Align.MIN, Align.CENTER))
+    passage = fillet(passage.edges().filter_by(Axis.Y), corner_r)
+    passage = passage.moved(Location(Vector(0, y_passage_start, cz)))
+
+    # 2) recess pocket -- cover_t deep into the outer back surface
+    recess = Box(recess_w, cover_t + 0.5, recess_h,
+                 align=(Align.CENTER, Align.MIN, Align.CENTER))
+    recess = fillet(recess.edges().filter_by(Axis.Y), corner_r + rebate_lip)
+    recess = recess.moved(Location(Vector(0, D - cover_t, cz)))
+
+    return passage.fuse(recess)
 
 
 # ─────────────────────────────────────────────────────────────────
-# BACK TOP LEDGE
+# (old BACK TOP LEDGE removed -- the rabbet shoulder replaces it)
 # ─────────────────────────────────────────────────────────────────
-
-def make_back_top_ledge():
-    """
-    Shelf inside the top of the back opening.
-    Width=cw, height=ledge_h, depth=ledge_d toward interior from opening plane.
-    Y: (D-r_back-ledge_d) -> (D-r_back)  i.e. 39.5mm -> 43mm
-    Z bottom = ledge_z ≈ 113.15mm
-    """
-    y_opening = D - r_back           # 43 mm -- opening plane
-    y_start   = y_opening - ledge_d  # 39.5 mm -- inside shell
-    box = Box(cw, ledge_d, ledge_h, align=(Align.CENTER, Align.MIN, Align.MIN))
-    return box.moved(Location(Vector(0, y_start, ledge_z)))
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -508,11 +537,11 @@ def make_wordmark_shapes(face_y_table=(None, None)):
             with BuildSketch(deboss_plane) as st:
                 if _style is not None:
                     Text(wordmark_text, font_size=wordmark_size,
-                         font="Liberation Sans", font_style=_style,
+                         font="Arial", font_style=_style,
                          align=(Align.CENTER, Align.CENTER))
                 else:
                     Text(wordmark_text, font_size=wordmark_size,
-                         font="Liberation Sans",
+                         font="Arial",
                          align=(Align.CENTER, Align.CENTER))
             _faces = st.sketch.faces()
             _parts = [extrude(f, amount=wordmark_depth + 0.2) for f in _faces]
@@ -655,19 +684,26 @@ def _wavy_wrap_ring(z_level: float, amp: float, phase_deg: float,
 def make_wave_ridges(outer_solid, face_y_table=(None, None)):
     """Full wave rib system: geometric Z spacing, dense at bottom, sparse at top.
 
-    Starts at z=38mm (screen-bottom zone).  Below z≈32mm the outer solid's
-    rounded base-corner tangent is entangled with the bottom-curve surface,
-    so the probe face_y table gives a value that places ribs on the downward-
-    facing corner rather than the viewer-facing front face -- they show up as
-    sideways tabs, not front-face ribs.  Starting at z=38mm avoids this zone
-    entirely; the face_y table is accurate and the front face is clean there.
+    The viewer-facing front face physically begins at z ≈ 8.22 mm -- the point
+    where the front-face tangent touches the base corner-circle (r_side=10,
+    front_lean=10°).  Above that line the face is clean and planar; below it the
+    surface curls under as the rounded base, so a rib there would tip onto the
+    underside.  We therefore start the rib series at z_min = 10 mm (1.9 mm of
+    clearance above the tangent) -- this packs the densest ribs into the base
+    grip zone, exactly as the design checklist's #1 intent requires, instead of
+    wasting the lower ~12 mm of grip face (the old z_min=20 did just that).
+
+    The earlier worry about "sideways tabs" near the base was an X-clip artefact,
+    not a front-Y problem: half_w (sharp trapezoid) vs the actual rounded width
+    differ by only ~0.5 mm at the base (verified in the geometry lab), so the
+    existing half_w clip is fine all the way down.
 
     Zone breakdown (approximate):
-      z=38–109mm  -> side-strip ribs only (screen window removes centre)
+      z=10–109mm  -> grip + side-strip ribs (screen window removes centre)
       z=109–118mm -> full-width ribs (above screen)
     """
-    z_min     = 20.0             # start well above base-corner geometry (circle zone ends ~z=16.5mm)
-    z_max_rib = H_front - 6.0   # ~118mm -- stop before top rib
+    z_min     = 10.0            # 1.9 mm above the base-curl tangent (z≈8.22mm)
+    z_max_rib = z_top_clear     # stop below the top dome / fillet zone
     # gap_base and gap_ratio are module-level parameters (see top of file)
 
     all_ribs = []
@@ -691,8 +727,8 @@ def make_wave_ridges(outer_solid, face_y_table=(None, None)):
                 print(f"    rib {i:2d}: z={z_lvl:.1f}  skipped")
         i += 1
 
-    # Dedicated top rib
-    _wy_t, z_top = on_front_face(6.0)
+    # Dedicated top rib -- sits just below the top dome (the highest clean face).
+    z_top = z_top_clear
     top_rib = _wavy_wrap_ring(z_top, wave_amp_top, 0.0, face_y_table)
     if top_rib is not None:
         all_ribs.append(top_rib)
@@ -714,6 +750,27 @@ def make_front_shell():
     print("  Building outer solid...")
     outer = make_outer_solid()
 
+    # ── True 3D top dome: fillet the top perimeter of the SOLID outer body ──
+    # Applied BEFORE hollowing, so the radius is limited by the form, not the
+    # 3 mm wall.  The cavity is capped below z_top_clear (see inner build), so
+    # this rounds into solid plastic -- a genuine pebble dome that curls in
+    # across the width like the base, not a wall-thinning edge-break.
+    top_filleted = False
+    if top_fillet > 0.05:
+        print(f"  Top dome fillet (solid, r={top_fillet})...")
+        try:
+            top_e = outer.edges().filter_by_position(
+                axis=Axis.Z, minimum=z_top_clear, maximum=H_front + 1.0
+            )
+            if len(top_e) > 0:
+                outer = fillet(top_e, top_fillet)
+                top_filleted = True
+                print(f"    filleted {len(top_e)} top edges [OK]")
+            else:
+                print("    no top edges in range")
+        except Exception as ex:
+            print(f"    Solid top fillet failed ({ex}); using post-hollow fallback")
+
     # ── Build front-face Y lookup table from the actual geometry ──
     print("  Sampling front-face Y table (replaces inaccurate formula)...")
     face_y_table = _sample_front_y(outer)
@@ -724,13 +781,25 @@ def make_front_shell():
     print("  Building inner solid...")
     inner = make_inner_solid()
 
+    # Cap the cavity below the dome so the top fillet rounds into solid plastic.
+    # Nothing lives in the top ~10 mm of the cavity (PCB/screen sit lower), so
+    # filling it solid costs almost no material and makes the dome wall-safe.
+    if top_fillet > 0.05:
+        cap = Box(W_front + 60, D + 60, z_top_clear + 40,
+                  align=(Align.CENTER, Align.CENTER, Align.MAX))
+        cap = cap.moved(Location(Vector(0, 0, z_top_clear)))
+        try:
+            inner = inner.intersect(cap)
+        except Exception as ex:
+            print(f"    inner cap failed: {ex}")
+
     # ── Wave ribs -- fuse to outer BEFORE hollowing ─────────────────
     #
     # Why here: fusing to a hollow shell unreliable in OCC -- the proud
     # part (Y < wy, outside outer face) needs to be added to a SOLID
     # body, not a thin-walled shell.  After inner is subtracted the
     # proud ribs survive because they sit entirely outside inner_solid
-    # (inner front face is at wy + wall·cos(9deg) ≈ wy + 3 mm).
+    # (inner front face is at wy + wall·cos(10deg) ≈ wy + 3 mm).
     print("  Wave ribs (fuse to outer solid, before hollow)...")
     rib_list = make_wave_ridges(outer, face_y_table)
     outer_ribs = outer
@@ -756,7 +825,7 @@ def make_front_shell():
 
     # ── Hollow ────────────────────────────────────────────────────
     print("  Hollowing (outer+ribs - inner)...")
-    shell = outer_ribs - inner
+    shell = _as_solid(outer_ribs - inner) or outer_ribs
     print(f"    DIAG shell vol after hollow = {shell.volume:.0f}")
 
     # ── Base chamfer (Z ≈ 0 perimeter edges) ──────────────────────
@@ -766,47 +835,45 @@ def make_front_shell():
             axis=Axis.Z, minimum=-0.02, maximum=0.5, inclusive=(True, True)
         )
         if len(base_e) > 0:
-            shell = chamfer(base_e, 2.5)
+            shell = chamfer(base_e, 1.0)
     except Exception as ex:
         print(f"    Skipped: {ex}")
 
-    # ── Top edge fillet ────────────────────────────────────────────
-    print("  Top fillet...")
-    try:
-        top_e = shell.edges().filter_by_position(
-            axis=Axis.Z, minimum=H_front - 8.0, maximum=H_front + 1.0
-        )
-        if len(top_e) > 0:
-            shell = fillet(top_e, 3.0)
-    except Exception as ex:
-        print(f"    Skipped: {ex}")
+    # ── Top edge fillet (fallback only) ────────────────────────────
+    # The pebble dome is the solid fillet on `outer` above.  This runs ONLY if
+    # that failed, giving at least a small wall-safe edge-break on the top.
+    if not top_filleted:
+        print("  Top fillet (post-hollow fallback)...")
+        try:
+            top_e = shell.edges().filter_by_position(
+                axis=Axis.Z, minimum=H_front - 8.0, maximum=H_front + 1.0
+            )
+            if len(top_e) > 0:
+                shell = fillet(top_e, min(2.5, max(top_fillet, 0.1)))
+        except Exception as ex:
+            print(f"    Skipped: {ex}")
 
-    # ── Back opening ───────────────────────────────────────────────
-    print("  Back opening cut...")
+    # ── Back opening (stepped rabbet for flush press-fit cover) ────
+    print("  Back opening rabbet...")
     try:
-        shell = shell - make_back_opening_cut()
+        shell = _as_solid(shell - make_back_opening_cut()) or shell
     except Exception as ex:
         print(f"    Failed: {ex}")
 
-    # ── Back top ledge ─────────────────────────────────────────────
-    print("  Back top ledge...")
-    try:
-        shell = shell.fuse(make_back_top_ledge())
-    except Exception as ex:
-        print(f"    Failed: {ex}")
+    # (back top ledge removed -- the rabbet shoulder now seats the cover)
 
     # ── Screen window ──────────────────────────────────────────────
     # Also removes rib material that crosses the screen area.
     print("  Screen window cut...")
     try:
-        shell = shell - make_screen_cut()
+        shell = _as_solid(shell - make_screen_cut()) or shell
     except Exception as ex:
         print(f"    Failed: {ex}")
 
     # ── USB housing pocket ─────────────────────────────────────────
     print("  USB housing cut...")
     try:
-        shell = shell - make_usb_housing_cut()
+        shell = _as_solid(shell - make_usb_housing_cut()) or shell
     except Exception as ex:
         print(f"    Failed: {ex}")
 
@@ -817,9 +884,9 @@ def make_front_shell():
     try:
         text_cut, rib_clear = make_wordmark_shapes(face_y_table)
         vol_before = shell.volume
-        shell = shell - rib_clear   # flatten wordmark zone first
+        shell = _as_solid(shell - rib_clear) or shell   # flatten wordmark zone first
         print(f"    DIAG rib_clear removed: {vol_before - shell.volume:.0f} mm3 (before={vol_before:.0f} after={shell.volume:.0f})")
-        shell = shell - text_cut    # then deboss text
+        shell = _as_solid(shell - text_cut) or shell    # then deboss text
     except Exception as ex:
         print(f"    Failed: {ex}")
 
@@ -829,7 +896,7 @@ def make_front_shell():
     if boss_list:
         for i, b in enumerate(boss_list):
             try:
-                shell = shell.fuse(b)
+                shell = _as_solid(shell.fuse(b)) or shell
                 print(f"    boss {i} fused [OK]")
             except Exception as ex:
                 print(f"    boss {i} fuse to shell failed: {ex}")
@@ -845,150 +912,78 @@ def make_front_shell():
 
 def make_back_cover():
     """
-    Back hatch cover.
-    Local coords: X=width (centred), Y=thickness (0=inner, cover_t=outer), Z=height.
-    Z=0 is bottom of panel (sits above USB housing when installed).
-    Total height = ch (main panel) + tongue_h (top tab).
+    Back cover -- FLUSH RABBET (friction press-fit). Built in its own local
+    frame for printing flat (flange face down on the bed):
+        X = width (centred), Z = height (0..recess_h), Y = thickness
+        Y=0 is the OUTER (flush) face; +Y points into the case.
+
+    Parts:
+      - FLANGE: thin plate (recess_w x recess_h x cover_t) that drops into the
+        shell recess and finishes flush with the back face.
+      - PLUG RIB: a picture-frame wall that slides into the opening; its outer
+        walls grip the opening walls by friction (clearance = fit_clear/side).
+      - LEAD-IN CHAMFER on the plug tip eases insertion.
+      - FINGERNAIL SCOOP in the flange bottom edge to pry it back out.
     """
-    tongue_h = ledge_h - 0.3    # 2.2mm top tongue fits under shell ledge
-    arch_w   = usb_housing_w + 4.0   # 18mm USB cable clearance arch
-    arch_h   = usb_housing_h + 1.0   # 9mm
+    plug_outer_w = open_w - 2.0 * fit_clear
+    plug_outer_h = open_h - 2.0 * fit_clear
+    plug_inner_w = plug_outer_w - 2.0 * plug_wall
+    plug_inner_h = plug_outer_h - 2.0 * plug_wall
 
-    total_h  = ch + tongue_h
-
-    # ── Main panel ─────────────────────────────────────────────────
-    print("  Cover: panel...")
-    panel = Box(cw, cover_t, total_h, align=(Align.CENTER, Align.MIN, Align.MIN))
-
-    # ── Arch cutout at bottom for USB cable ────────────────────────
-    print("  Cover: arch cut...")
+    # ── Flange (flush plate) ───────────────────────────────────────
+    print("  Cover: flange...")
+    flange = Box(recess_w, cover_t, recess_h, align=(Align.CENTER, Align.MIN, Align.CENTER))
     try:
-        arch = Box(arch_w, cover_t + 0.4, arch_h,
-                   align=(Align.CENTER, Align.MIN, Align.MIN))
-        arch = arch.moved(Location(Vector(0, -0.2, 0)))
-        # Chamfer the top of the arch in X (the long edges, length=arch_w)
-        # Only chamfer the long horizontal edges to avoid thin-edge failures
+        flange = fillet(flange.edges().filter_by(Axis.Y), corner_r + rebate_lip)
+    except Exception as ex:
+        print(f"    flange fillet skipped: {ex}")
+
+    # ── Plug rib (picture-frame wall) ──────────────────────────────
+    print("  Cover: plug rib...")
+    try:
+        outer = Box(plug_outer_w, plug_depth, plug_outer_h,
+                    align=(Align.CENTER, Align.MIN, Align.CENTER))
+        outer = outer.moved(Location(Vector(0, cover_t, 0)))
         try:
-            arch_top_long = [
-                e for e in arch.edges().filter_by_position(
-                    axis=Axis.Z, minimum=arch_h - 0.1, maximum=arch_h + 0.1
-                )
-                if e.length > arch_w * 0.5  # only long edges
-            ]
-            if arch_top_long:
-                arch = chamfer(arch_top_long, 1.0)
+            outer = fillet(outer.edges().filter_by(Axis.Y), corner_r)
         except Exception:
-            pass  # proceed without chamfer on arch
-        panel = panel - arch
-    except Exception as ex:
-        print(f"    Arch skipped: {ex}")
-
-    # ── Chamfer all edges (try; skip if topology fails) ───────────
-    print("  Cover: edge chamfer...")
-    try:
-        # Only chamfer edges longer than 2mm to avoid thin-edge failures
-        long_edges = [e for e in panel.edges() if e.length > 2.0]
-        if long_edges:
-            panel = chamfer(long_edges, 0.4)
-    except Exception as ex:
-        print(f"    Chamfer skipped: {ex}")
-
-    # ── Snap tabs (two side tabs) ──────────────────────────────────
-    print("  Cover: snap tabs...")
-    try:
-        tab_x = cw / 2.0 - tab_w / 2.0 - 4.0
-        for xp in [tab_x, -tab_x]:
-            # Arm: hangs below Z=0 (below panel bottom edge)
-            arm = Box(tab_w, tab_thick, tab_len,
-                      align=(Align.CENTER, Align.MIN, Align.MAX))
-            arm = arm.moved(Location(Vector(xp, 0.0, 0.0)))
-            panel = panel.fuse(arm)
-
-            # Snap bump at free end of arm (outermost Z = -tab_len)
-            bump = Box(tab_w - 1.0, bump_h, 3.0,
-                       align=(Align.CENTER, Align.MAX, Align.MIN))
-            bump = bump.moved(Location(Vector(xp, 0.0, -tab_len)))
-            try:
-                panel = panel.fuse(bump)
-            except Exception:
-                pass
-
-            # Flex slots: thin gaps on either side of the arm through the panel
-            for side in [-1.0, 1.0]:
-                slot = Box(slot_gap, cover_t + 0.4, tab_len + slot_gap,
-                           align=(Align.MIN, Align.MIN, Align.MAX))
-                slot = slot.moved(Location(Vector(xp + side * (tab_w / 2.0), -0.2, 0.0)))
-                try:
-                    panel = panel - slot
-                except Exception:
-                    pass
-
-    except Exception as ex:
-        print(f"    Tabs failed: {ex}")
-
-    # ── Vent holes (5x3 grid, Ø2.2mm, 8mm spacing) ────────────────
-    print("  Cover: vent holes...")
-    nx, nz    = 5, 3
-    spacing   = 8.0
-    grid_cz   = ch * 0.52   # centred in main panel body
-    for ix in range(nx):
-        for iz in range(nz):
-            x = (ix - (nx - 1) / 2.0) * spacing
-            z = grid_cz + (iz - (nz - 1) / 2.0) * spacing
-            if 4.0 < z < ch - 2.0 and abs(x) < cw / 2.0 - 3.0:
-                try:
-                    hole = Cylinder(1.1, cover_t + 0.4,
-                                    align=(Align.CENTER, Align.CENTER, Align.CENTER))
-                    # Rotation(90,0,0) maps cylinder Z-axis -> Y-axis (through the panel)
-                    hole = hole.moved(Rotation(90, 0, 0)).moved(
-                        Location(Vector(x, cover_t / 2.0, z))
-                    )
-                    panel = panel - hole
-                except Exception:
-                    pass
-
-    # ── Fingernail notch at bottom centre (between tabs) ──────────
-    print("  Cover: fingernail notch...")
-    try:
-        notch = Box(20.0, cover_t + 0.4, 3.5,
-                    align=(Align.CENTER, Align.MIN, Align.MIN))
-        notch = notch.moved(Location(Vector(0, -0.2, -3.5)))
-        panel = panel - notch
-    except Exception as ex:
-        print(f"    Notch skipped: {ex}")
-
-    # ── Horizontal ribs on outer face (matching front face style) ─
-    print("  Cover: outer ribs...")
-    for i, z_rib in enumerate([ch * 0.70, ch * 0.35]):
-        amp   = (wave_amp_top + wave_amp_bot) / 2.0
-        phase = i * wave_phase_step
-
-        pts = []
-        for j in range(wave_segments + 1):
-            t = j / wave_segments
-            x = -cw / 2.0 + t * cw
-            z = z_rib + amp * math.sin(math.radians(360.0 * x / wave_wavelen + phase))
-            pts.append(Vector(x, cover_t, z))
-
-        if len(pts) < 3:
-            continue
+            pass
+        inner = Box(plug_inner_w, plug_depth + 1.0, plug_inner_h,
+                    align=(Align.CENTER, Align.MIN, Align.CENTER))
+        inner = inner.moved(Location(Vector(0, cover_t - 0.5, 0)))
         try:
-            edges    = [Edge.make_line(pts[j], pts[j + 1]) for j in range(len(pts) - 1)]
-            path_w   = Wire(edges)
-            t0       = (pts[1] - pts[0]).normalized()
-            nrm      = Vector(0, 0, 1).cross(t0)
-            if nrm.length < 1e-6:
-                nrm = Vector(0, 1, 0)
-            nrm      = nrm.normalized()
-            rp       = Plane(origin=pts[0], x_dir=nrm, z_dir=t0)
-            with BuildSketch(rp) as rs:
-                Circle(ridge_dia / 2.0)
-            rib = sweep(rs.sketch.face(), path=path_w, multisection=False)
-            panel = panel.fuse(rib)
-        except Exception as ex:
-            print(f"    Rib {i} skipped: {ex}")
+            inner = fillet(inner.edges().filter_by(Axis.Y), max(corner_r - plug_wall, 1.0))
+        except Exception:
+            pass
+        rib = outer - inner
 
-    return panel
+        # Lead-in chamfer on the plug tip (the +Y end), outer edges only
+        try:
+            tip_y = cover_t + plug_depth
+            tip_edges = rib.edges().filter_by_position(
+                axis=Axis.Y, minimum=tip_y - 0.05, maximum=tip_y + 0.05
+            )
+            if len(tip_edges) > 0:
+                rib = chamfer(tip_edges, plug_cham)
+        except Exception as ex:
+            print(f"    plug chamfer skipped: {ex}")
+
+        cover = flange.fuse(rib)
+    except Exception as ex:
+        print(f"    plug rib failed: {ex}")
+        cover = flange
+
+    # ── Fingernail scoop in the flange bottom edge ─────────────────
+    print("  Cover: fingernail scoop...")
+    try:
+        scoop = Box(notch_w, notch_h + 0.5, notch_h,
+                    align=(Align.CENTER, Align.MIN, Align.MIN))
+        scoop = scoop.moved(Location(Vector(0, -0.25, -recess_h / 2.0 - 0.01)))
+        cover = cover - scoop
+    except Exception as ex:
+        print(f"    scoop skipped: {ex}")
+
+    return cover
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -1002,7 +997,8 @@ if __name__ == "__main__":
     print(f"  Height:       {H_front}mm front, {H_back:.2f}mm back")
     print(f"  Face length:  {face_len:.2f}mm")
     print(f"  top_front_y:  {top_front_y:.2f}mm")
-    print(f"  Cover panel:  {cw:.2f}mm wide x {ch:.2f}mm tall")
+    print(f"  Cover:        flush rabbet, {recess_w:.1f}x{recess_h:.1f}mm flange, "
+          f"plug {plug_depth:.1f}mm deep, fit clearance {fit_clear:.2f}mm")
     print("=" * 62)
 
     output_dir = r"C:\Users\Khygan\Documents\Openscan +claude"
