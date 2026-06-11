@@ -108,21 +108,25 @@ usb_housing_w = 14.0
 usb_housing_h = 8.0
 usb_housing_d = 12.0
 
-# Wave ribs
-ridge_dia       = 2.2
-gap_base        = 3.0    # mm -- rib-to-rib gap at base (densest zone)
-gap_ratio       = 1.15   # geometric growth per rib (15% wider each step)
-wave_amp_top    = 2.4
+# Wave ribs (smooth swept rounded beads)
+ridge_dia       = 1.8    # bead diameter (finer = more refined; was 2.2 blocky)
+ridge_proud     = 0.9    # mm the bead tip stands proud of the outer face
+gap_base        = 4.5    # mm -- rib-to-rib gap at base (denser grip zone => +1 bottom rib)
+gap_ratio       = 1.22   # geometric growth per rib (spreads faster toward the top)
+wave_amp_top    = 1.5    # flatter top wave (was 2.4)
 wave_amp_bot    = 0.8
+wave_amp_caprib = 0.5    # the single cap rib at the very top -- nearly flat
 wave_wavelen    = 70.0
 wave_phase_step = 35.0
-wave_segments   = 48
+wave_segments   = 80     # path samples per rib (smooth sweep, not box count)
 
 # Wordmark
 wordmark_text               = "tidee"
-wordmark_size               = 11.0
+wordmark_size               = 13.0   # slightly smaller (was 15)
 wordmark_depth              = 1.5
-wordmark_offset_from_bottom = 32.0
+wordmark_offset_from_bottom = 28.0   # raised a touch so 3 grip ribs sit below it and the lone mid-rib is absorbed into the flank band
+wordmark_clear_w            = 46.0   # rib-free band width around the logo
+wordmark_clear_h            = 14.0   # rib-free band height (sized to the smaller mark)
 
 # Back cover -- FLUSH RABBET JOINT (friction press-fit, adapted from StockTracker)
 #   The cover is a thin flange that seats into a recess (so its outer face is
@@ -216,7 +220,8 @@ def _sample_front_y(outer_solid, n: int = 18):
     # base curl (a downward-facing surface), which would corrupt the table and
     # tip near-base ribs onto the underside.  Keep every sample on the clean,
     # viewer-facing front face.
-    z_lo   = 8.5
+    z_lo   = 7.0             # extend just onto the base-curl transition so the
+                             # lowest rib (z≈8) gets a valid surface-Y sample
     z_hi   = z_top_clear     # stop below the top dome / fillet zone
     z_list = [z_lo + (z_hi - z_lo) * i / (n - 1) for i in range(n)]
     y_list = []
@@ -479,16 +484,25 @@ def make_back_opening_cut():
     y_passage_end   = D - cover_t             # 48.5 mm, recess floor
     passage = Box(open_w, (y_passage_end - y_passage_start) + 0.02, open_h,
                   align=(Align.CENTER, Align.MIN, Align.CENTER))
-    passage = fillet(passage.edges().filter_by(Axis.Y), corner_r)
+    try:
+        passage = fillet(passage.edges().filter_by(Axis.Y), corner_r)
+    except Exception as ex:
+        print(f"    opening passage fillet skipped ({ex}); sharp corners")
     passage = passage.moved(Location(Vector(0, y_passage_start, cz)))
 
     # 2) recess pocket -- cover_t deep into the outer back surface
     recess = Box(recess_w, cover_t + 0.5, recess_h,
                  align=(Align.CENTER, Align.MIN, Align.CENTER))
-    recess = fillet(recess.edges().filter_by(Axis.Y), corner_r + rebate_lip)
+    try:
+        recess = fillet(recess.edges().filter_by(Axis.Y), corner_r + rebate_lip)
+    except Exception as ex:
+        print(f"    opening recess fillet skipped ({ex}); sharp corners")
     recess = recess.moved(Location(Vector(0, D - cover_t, cz)))
 
-    return passage.fuse(recess)
+    # Return the two parts to be subtracted SEPARATELY -- never fuse them into
+    # one cutter.  A failed fuse used to throw and leave the whole back SOLID;
+    # subtracting each part independently guarantees the opening always forms.
+    return [passage, recess]
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -606,74 +620,111 @@ def _binary_fuse(shapes: list):
 def _wavy_wrap_ring(z_level: float, amp: float, phase_deg: float,
                     face_y_table=(None, None)):
     """
-    One wave rib: boxes placed DIRECTLY on the front face surface.
+    One wave rib as a single smooth SWEPT bead (refined rounded ridge).
 
-    No rotation, no shell boolean ops.  Each small box sits FULLY PROUD
-    of the outer face surface (matching OpenSCAD offset_3d(ridge_dia)):
-        wy_start = wy - ridge_dia      ← rib tip, 1.6mm proud
-        Box Y: [wy_start, wy_start + ridge_dia + 0.5]
-             = [wy-1.6, wy+0.5]
-        Y < wy  ->  proud bead (full ridge_dia height outside surface)
-        Y > wy  ->  0.5mm embedded in wall for fuse connectivity
+    A circular profile (radius ridge_dia/2) is swept along a smooth wave path
+    running across the front face at height z_level, modulated in Z by
+    amp*sin(...).  The bead stands `ridge_proud` mm proud of the ACTUAL outer
+    face surface; the rest is buried in the wall for a clean fuse.
 
-    align=(MIN, MIN, CENTER):  starts at (xj, wy_start), centred in Z.
-    Adjacent boxes overlap in Z (ridge_dia 1.6mm > ΔZ ≈ 0.5mm) so
-    _binary_fuse produces one solid connected rib per level.
+    Why sweep instead of the old box-stack: sweeping a CIRCLE is rotationally
+    symmetric, so the result is twist-proof and ONE continuous solid.  The old
+    approach stacked ~48 axis-aligned boxes that stopped overlapping wherever
+    the wave got steep -- which is what broke the ribs into the blocky,
+    disconnected 'railway-track' segments.
     """
-    lr    = math.radians(front_lean)
-    n_seg = wave_segments                  # 48
-    x_ext = W_front / 2.0 + 2.0           # just cover the front face
-    step  = (2.0 * x_ext) / n_seg
+    lr   = math.radians(front_lean)
+    rr   = ridge_dia / 2.0
+    z_tab, y_tab = face_y_table
 
-    boxes = []
-    for j in range(n_seg):
-        xj = -x_ext + j * step
-        xc = xj + step * 0.5              # segment centre X
+    n_pts = max(int(wave_segments), 24)
+    x_ext = W_front / 2.0 + 2.0
 
-        # Wave Z offset
+    # Logo clear-zone (rib-free band so the big wordmark reads cleanly).
+    # Ribs that cross it are split into left/right runs around the band.
+    _wy_wm, z_wm = on_front_face(face_len - wordmark_offset_from_bottom)
+    logo_z_lo = z_wm - wordmark_clear_h / 2.0
+    logo_z_hi = z_wm + wordmark_clear_h / 2.0
+    logo_hw   = wordmark_clear_w / 2.0
+
+    # Collect point RUNS: a new run starts whenever the rib leaves the face
+    # (edge trim) or enters the logo clear-zone.
+    runs = []
+    cur  = []
+    def _flush():
+        if len(cur) >= 2:
+            runs.append(list(cur))
+        cur.clear()
+
+    for j in range(n_pts + 1):
+        xc  = -x_ext + (2.0 * x_ext) * j / n_pts
         z_w = z_level + amp * math.sin(
             math.radians(360.0 * xc / wave_wavelen + phase_deg)
         )
-
-        # Face position at this wave height
         v = (H_front - z_w) / math.cos(lr)
         if v <= 0.0 or v >= face_len:
-            continue
-        _wy_raw, wz = on_front_face(v)   # wz is correct; _wy_raw is the raw polygon edge
+            _flush(); continue
+        _wy_raw, wz = on_front_face(v)
 
-        # Actual outer hull surface Y -- use sampled table when available
-        z_tab, y_tab = face_y_table
+        # Actual outer hull surface Y (sampled table when available)
         if z_tab is not None:
             wy_face = _interp_front_y(wz, z_tab, y_tab)
         else:
             wy_face = _front_face_outer_y(wz)
 
-        # Clip to face width using the corrected face Y
-        if abs(xc) > half_w(wy_face) + 1.0:
+        # Trim so the rounded bead stays ON the front face (no nub past corner)
+        if abs(xc) > half_w(wy_face) - rr - 0.5:
+            _flush(); continue
+
+        # Logo clear-zone: break the rib here so it skirts the wordmark
+        if logo_z_lo < wz < logo_z_hi and abs(xc) < logo_hw:
+            _flush(); continue
+
+        # Bead CENTRE: proud tip at wy_face - ridge_proud, centre one radius
+        # behind the tip -> stands ridge_proud proud, rest buried (solid weld).
+        cy = wy_face - ridge_proud + rr
+        cur.append(Vector(xc, cy, wz))
+    _flush()
+
+    if not runs:
+        return None
+
+    solids = []
+    for pts in runs:
+        if len(pts) < 2:
             continue
+        try:
+            edges  = [Edge.make_line(pts[k], pts[k + 1]) for k in range(len(pts) - 1)]
+            path_w = Wire(edges)
+            t0     = (pts[1] - pts[0]).normalized()
+            nrm    = Vector(0, 0, 1).cross(t0)
+            if nrm.length < 1e-6:
+                nrm = Vector(0, 1, 0)
+            nrm    = nrm.normalized()
+            rp     = Plane(origin=pts[0], x_dir=nrm, z_dir=t0)
+            with BuildSketch(rp) as rs:
+                Circle(rr)
+            seg = sweep(rs.sketch.face(), path=path_w, multisection=False)
+        except Exception as ex:
+            # Fallback: overlapping spheres along the SAME path -- spacing is
+            # well under the bead diameter, so they merge into one continuous
+            # ridge that cannot segment.  Bulletproof across build123d versions.
+            print(f"    rib z={z_level:.1f} sweep failed ({ex}); sphere fallback")
+            try:
+                beads = [Solid.make_sphere(rr).moved(Location(p)) for p in pts]
+                seg   = _binary_fuse(beads)
+            except Exception as ex2:
+                print(f"    rib z={z_level:.1f} fallback failed: {ex2}")
+                seg = None
+        if seg is not None:
+            solids.append(seg)
 
-        # Place box FULLY proud of the outer surface.
-        # OpenSCAD original used offset_3d(ridge_dia) so the rib sits
-        # entirely outside the face -- full ridge_dia (1.6mm) proud.
-        # We replicate that with:
-        #   wy_start = wy_face - ridge_dia   ← rib tip, 1.6mm in front of actual face
-        #   box Y width = ridge_dia + 0.5mm overlap inside wall
-        # The 0.5mm overlap ensures OCC fuse registers the intersection.
-        wy_start = wy_face - ridge_dia
-        box = Box(step + 0.05, ridge_dia + 0.5, ridge_dia,
-                  align=(Align.MIN, Align.MIN, Align.CENTER))
-        box = box.moved(Location(Vector(xj, wy_start, wz)))
-        boxes.append(box)
-
-    if not boxes:
+    if not solids:
         return None
-
-    result = _binary_fuse(boxes)
-    if result is None:
-        return None
+    result = solids[0] if len(solids) == 1 else _binary_fuse(solids)
 
     try:
-        if result.volume < 1.0:
+        if result is None or result.volume < 0.3:
             return None
     except Exception:
         return None
@@ -702,8 +753,13 @@ def make_wave_ridges(outer_solid, face_y_table=(None, None)):
       z=10–109mm  -> grip + side-strip ribs (screen window removes centre)
       z=109–118mm -> full-width ribs (above screen)
     """
-    z_min     = 10.0            # 1.9 mm above the base-curl tangent (z≈8.22mm)
-    z_max_rib = z_top_clear     # stop below the top dome / fillet zone
+    z_min       = 8.0            # start at the very base of the flat front face
+                                  # (front-face tangent is z≈8.22; this sits the
+                                  # lowest rib right where the face meets the base
+                                  # curl, minimising the dead gap at the bottom)
+    z_max_rib   = z_top_clear     # stop below the top dome / fillet zone
+    top_clear_z = 9.0             # keep the last series rib this far below the
+                                  # dedicated top rib, so they don't double up
     # gap_base and gap_ratio are module-level parameters (see top of file)
 
     all_ribs = []
@@ -711,7 +767,7 @@ def make_wave_ridges(outer_solid, face_y_table=(None, None)):
     while i < 80:
         pos   = gap_base * (gap_ratio ** i - 1.0) / (gap_ratio - 1.0)
         z_lvl = z_min + pos
-        if z_lvl >= z_max_rib:
+        if z_lvl >= z_max_rib - top_clear_z:
             break
 
         v = (H_front - z_lvl) / math.cos(math.radians(front_lean))
@@ -729,7 +785,7 @@ def make_wave_ridges(outer_solid, face_y_table=(None, None)):
 
     # Dedicated top rib -- sits just below the top dome (the highest clean face).
     z_top = z_top_clear
-    top_rib = _wavy_wrap_ring(z_top, wave_amp_top, 0.0, face_y_table)
+    top_rib = _wavy_wrap_ring(z_top, wave_amp_caprib, 0.0, face_y_table)
     if top_rib is not None:
         all_ribs.append(top_rib)
         print(f"    top rib: z={z_top:.1f}  vol={top_rib.volume:.0f}mm3")
@@ -855,10 +911,11 @@ def make_front_shell():
 
     # ── Back opening (stepped rabbet for flush press-fit cover) ────
     print("  Back opening rabbet...")
-    try:
-        shell = _as_solid(shell - make_back_opening_cut()) or shell
-    except Exception as ex:
-        print(f"    Failed: {ex}")
+    for _i, _part in enumerate(make_back_opening_cut()):
+        try:
+            shell = _as_solid(shell - _part) or shell
+        except Exception as ex:
+            print(f"    opening part {_i} failed: {ex}")
 
     # (back top ledge removed -- the rabbet shoulder now seats the cover)
 
@@ -870,12 +927,11 @@ def make_front_shell():
     except Exception as ex:
         print(f"    Failed: {ex}")
 
-    # ── USB housing pocket ─────────────────────────────────────────
-    print("  USB housing cut...")
-    try:
-        shell = _as_solid(shell - make_usb_housing_cut()) or shell
-    except Exception as ex:
-        print(f"    Failed: {ex}")
+    # ── USB-C access ───────────────────────────────────────────────
+    # The USB-C opening is a NOTCH in the bottom of the COVER (see
+    # make_back_cover), NOT a cut in the shell -- so the shell base stays
+    # fully SOLID.  The old make_usb_housing_cut() punched z=0..8 and opened
+    # the base; it is intentionally no longer applied here.
 
     # ── Wordmark deboss ────────────────────────────────────────────
     # rib_clear removes proud rib material from the wordmark zone
@@ -973,15 +1029,18 @@ def make_back_cover():
         print(f"    plug rib failed: {ex}")
         cover = flange
 
-    # ── Fingernail scoop in the flange bottom edge ─────────────────
-    print("  Cover: fingernail scoop...")
+    # ── USB-C notch in the cover bottom edge ───────────────────────
+    # Cuts clean through flange + plug at bottom-centre so the USB-C cable
+    # reaches the board's port.  Keeps the shell base solid (the port is on
+    # the back panel, not the case base).  Doubles as the fingernail pry point.
+    print("  Cover: USB-C notch...")
     try:
-        scoop = Box(notch_w, notch_h + 0.5, notch_h,
-                    align=(Align.CENTER, Align.MIN, Align.MIN))
-        scoop = scoop.moved(Location(Vector(0, -0.25, -recess_h / 2.0 - 0.01)))
-        cover = cover - scoop
+        usb = Box(usb_housing_w, cover_t + plug_depth + 2.0, usb_housing_h,
+                  align=(Align.CENTER, Align.MIN, Align.MIN))
+        usb = usb.moved(Location(Vector(0, -0.5, -recess_h / 2.0 - 0.01)))
+        cover = cover - usb
     except Exception as ex:
-        print(f"    scoop skipped: {ex}")
+        print(f"    USB notch skipped: {ex}")
 
     return cover
 
@@ -1030,7 +1089,7 @@ if __name__ == "__main__":
 
     print("\nOpening preview...")
     from ocp_vscode import set_port
-    set_port(3939)          # re-establish config handshake now that backend is running
+    set_port(3939)
     show(front_shell, back_cover.moved(Location(Vector(W_front + 30, 0, 0))),
          port=3939, reset_camera="reset",
          names=["front_shell", "back_cover"])
